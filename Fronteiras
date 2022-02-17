@@ -1,0 +1,160 @@
+---
+title: "Fronteira Pernambuco"
+author: "Natália Sarellas"
+date: "15/02/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+
+# Mapear municípios na fronteira com Pernambuco
+
+```{r message=FALSE, warning=FALSE}
+# Pacotes
+library("tidyverse")
+library("tidylog")
+library("dplyr")
+library("readxl")
+library("sf")
+library("lwgeom")
+library("rgdal")
+
+# geobr
+library("geobr")
+# Para abrir shapefiles
+library("raster")
+library("maptools")
+# Para achar fronteiras
+library(sp)
+library(spdep)
+# Extra
+library(stringr)     # for working with strings (pattern matching)
+library(spData)      # load geographic data
+library(spDataLarge) # load larger geographic data
+library(data.table)
+library(mapview)
+library(tmap)
+library(tidycensus)
+library(tigris)
+library(lehdr)
+
+```
+
+
+## Usando o GEOBR
+
+```{r message=FALSE, warning=FALSE}
+
+# Puxando todos os municípios do BR
+mun_total <- read_municipality(code_muni="all", year=2020)
+
+# Estados fronteira com PE, incluindo PE
+est_front <-              
+  mun_total %>%
+  filter(abbrev_state %in% c("PE", "PB", "CE", "AL", "BA", "PI"))
+
+est_front %>% 
+  ggplot() +
+  geom_sf()
+
+```
+
+
+
+
+```{r message=FALSE, warning=FALSE}
+
+## Criando subconjuntos de dados geográficos para PE e estados de fronteira:
+
+pernambuco <-
+  est_front %>% 
+  filter(abbrev_state == "PE")
+
+
+
+ggplot() +
+  geom_sf(data = est_front) +
+  geom_sf(data = pernambuco, fill = 'red') +
+  scale_fill_viridis_d() +
+  theme(legend.position = "bottom") 
+
+
+## Lista de municípios que fazem fronteira com PE + municípios de PE 
+
+fronteira <- st_filter(x = est_front, y = pernambuco, .predicate = st_intersects)
+
+
+## Gráfico PE e municípios de fronteira:
+
+st_filter(x = est_front, y = pernambuco, .predicate = st_intersects) %>%
+    ggplot() +
+    geom_sf() +
+    geom_sf(data = pernambuco, fill = 'red')
+
+
+
+  
+```
+
+## Função para criar a base de municípios de fronteira (Leonardo)
+
+```{r}
+
+# Função para criar base de municípios de fronteira
+
+mun.test <- lapply(pernambuco$code_muni, function(i){
+  
+  tmp0 <- pernambuco %>% 
+    filter(code_muni == i)
+  tmp1 <- est_front %>% 
+    filter(code_state != 26) %>% 
+    bind_rows(tmp0)
+  
+  fronteira <- st_filter(x = tmp1 , y = tmp0, .predicate = st_intersects)
+  
+  fronteira <- fronteira %>% 
+    mutate(mun_pe = i)
+  
+})
+
+mun.test2 <- do.call(rbind, mun.test)   # transforma em tabela
+
+# exclui municípios de PE da base 
+mun.test3 <- mun.test2 %>% 
+  filter(code_muni != mun_pe)
+
+```
+
+# Próximos passos 17/02/22
+Agora quero filtrar as duas bases criadas e unir com dados de homicídio disponíveis. 
+
+- Base municípios vizinhos (mun_match_sem_pe)
+- Base municípios de PE com fronteira externa (mun_front_pe_int)
+- Manter apenas code_muni, code_pe, geom OK
+- Passar geom para o modo Lat/long
+- Juntar com dados de homicídio por município
+
+```{r}
+
+# Municípios de fronteira FORA de PE
+mun_match_sem_pe <- mun.test3 %>% dplyr::select(code_muni, mun_pe)
+
+# Municípios de fronteira DENTRO de PE
+mun_front_pe_int <-
+  mun.test3 %>% 
+    group_by(mun_pe) %>%
+    summarize() 
+
+
+
+
+  # para tentar transformar as coordenadas:
+ # st_as_sf(coords=c("lon","lat"), crs=4326)
+
+
+```
+
