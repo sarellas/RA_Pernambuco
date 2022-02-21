@@ -1,0 +1,222 @@
+---
+title: "Juntando Bases de Municípios de Fronteira e Homicídios"
+author: "Natália Sarellas"
+date: "18/02/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE, error=FALSE, warning=FALSE, message=FALSE)
+```
+
+```{r}
+# load homicidies
+require(read.dbc)
+require(tidyverse)
+require(microdatasus)
+require(data.table)
+library(lubridate)
+library(janitor)
+library(here)
+```
+
+
+# Pagando dados do DataSUS através do código do Bruce:
+
+**Não há necessidade de rodar essa parte novamente! **
+
+```{r eval=FALSE, include=FALSE}
+require(microdatasus)
+
+# microdatasus test ground
+# NATALIA: trocar o UF de interesse para cada estado de fronteira com PE:
+dados <- fetch_datasus(year_start = 2002, year_end = 2016, uf = "PE",
+                    information_system = "SIM-DO")
+
+codmun <- data.table::fread("municipio.csv")
+codmun <- codmun[, .(id_municipio,
+                     id_municipio_6,
+                     id_municipio_tse,
+                     nm_municipio = nome,
+                     id_regiao_saude,
+                     id_microrregiao,
+                     id_mesorregiao)]
+
+# homicides codes
+source("homicides_codes.R")
+homicides_codes <- homicides_codes() %>% .[, .(causabas = codes,
+                                               instrument,
+                                               intention,
+                                               homicides)]
+
+setDT(dados)   # transforma em table
+
+dados <- dados[, c("CODMUNRES", "CODMUNOCOR", "CODESTAB", "CAUSABAS", "CIRCOBITO", "LOCOCOR", "HORAOBITO", "DTOBITO", "DTNASC", "IDADE","SEXO", "RACACOR", "ESC", "ESC2010", "ESCMAE", "ESCMAE2010")]
+
+dados <-  process_sim(dados, municipality_data = FALSE) %>%
+  clean_names() %>%
+  setDT()
+
+# rename columns
+setnames(dados, c("idad_eanos"), c("idade"))
+
+# select only relevant ages
+#dados <- dados[idade %between% c(12, 30)]
+
+# clear dates
+dados[, ':='(dtobito = as_date(dtobito))]
+dados[, ':='(mesobito = month(dtobito))]
+dados[, ':='(anoobito = year(dtobito))]
+
+# recode gender
+dados[, sexo := fcase(sexo == "Feminino", "f",
+                      sexo == "Masculino", "m")]
+
+# drop missings in key columns
+dados <- dados[is.na(idade) == FALSE]
+dados <- dados[is.na(sexo) == FALSE]
+
+# create 6-digit ibge code
+dados[, ':='(id_municipio_6 = as.numeric(str_sub(codmunres, 1, 6)))]
+
+# classify ICD-10 codes by 'homicide' and 'other'
+dados <- merge(dados, homicides_codes, by = c("causabas"), all.x = TRUE)
+dados[, category := fifelse(is.na(homicides) == 1, "other", "homicide")]
+
+# count number of deaths by category, death details, and geo/time variables
+dados <- dados[, .N, by = .(id_municipio_6, category, intention, instrument, anoobito, idade, sexo)]
+setnames(dados, "N","count")
+
+
+dados <- merge(dados, codmun, by = c("id_municipio_6"))
+setcolorder(dados, c("id_municipio", "id_municipio_6", "id_microrregiao", "id_mesorregiao", "id_municipio_tse", "id_regiao_saude", "nm_municipio", "anoobito", "idade", "sexo", "intention", "instrument", "category", "count"))
+
+# Standardize munic names to create join key
+nm_municipio <- unique(dados$nm_municipio)
+mun_match <- make_clean_names(nm_municipio)
+mun_match <- str_replace_all(mun_match, "_\\d+$", "")
+mun_match_df <- data.frame(nm_municipio, mun_match)
+dados <- merge(dados, mun_match_df,
+               all.x = TRUE,
+               all.y = FALSE,
+               by = "nm_municipio")
+
+
+gc()
+
+
+dados[, school_age := fifelse(idade %between% c(15, 19), 1, 0)]
+dados[, control_age := fifelse(idade %between% c(20, 24), 1, 0)]
+dados[, all_ages := 1]
+
+dados <- dados[sexo == "m" | sexo == "f"]
+
+dados <- dados[, .(deaths = sum(count, na.rm = TRUE)), by = .(anoobito, id_municipio, mun_match, category, sexo, school_age, control_age, all_ages)]
+
+dados <- dcast(dados,
+               formula = id_municipio + mun_match + anoobito  ~ category + sexo + school_age + control_age + all_ages,
+               value.var = c("deaths"),
+               fun.aggregate = function(x) sum(x, na.rm = T),
+               sep = "_")
+
+setnames(dados,
+         c("id_municipio", "anoobito", "homicide_m_1_0_1","homicide_m_0_1_1", "homicide_m_0_0_1","homicide_f_1_0_1","homicide_f_0_1_1", "homicide_f_0_0_1", "other_m_1_0_1", "other_m_0_1_1","other_m_0_0_1", "other_f_1_0_1", "other_f_0_1_1","other_f_0_0_1"),
+         c("codibge7", "year", "homic_m_treated","homic_m_control", "homic_m_all","homic_f_treated","homic_f_control", "homic_f_all", "other_m_treated","other_m_control", "other_m_all", "other_f_treated","other_f_control", "other_f_all"))
+
+# NATALIA: trocar nome do arquivo csv por "homicides_sigladoestado":
+
+fwrite(dados, file = here("temp_scripts_natalia","homicides_pe.csv"), sep = ";")
+
+```
+
+
+
+
+
+# Filtrando dados apenas para municípios de fronteira com PE 
+
+
+Passo a passo:
+
+- Empilhar bases dos estados de fronteira (PB, CE, AL, BA, PI)
+
+    Cada base foi salva em arquivo csv separado nomeado como **homicides_uf.csv**
+    
+- Fazer merge com base de dados dos municípios de fronteira com PE
+
+    **fronteira_sem_pe.csv**
+    
+    
+```{r}
+# Abrindo as bases de homicídios dos estados vizinhos
+
+homic_al <- read_delim("homicides_al.csv", delim = ";")
+homic_ba <- read_delim("homicides_ba.csv", delim = ";")
+homic_ce <- read_delim("homicides_ce.csv", delim = ";")
+homic_pb <- read_delim("homicides_pb.csv", delim = ";")
+homic_pi <- read_delim("homicides_pi.csv", delim = ";")
+
+
+# Empilhando as bases (homicídios nos estados de fronteira sem PE):
+
+homic_est_front <-
+  bind_rows(homic_al, homic_ba, homic_ce, homic_pb, homic_pi)
+
+# Dados de homicídio para PE
+
+homic_pe <- read_delim("homicides_pe.csv", delim = ";")
+
+
+```
+
+Agora queremos juntar essa base de dados que reúne os homicídios de todos os municípios dos estados que fazem fronteira com PE, de forma que mantenha apenas os dados para os municípios de fronteira. 
+
+
+```{r}
+# Puxar base com municípios de fronteira fora de PE (mun_front_ext.csv) e dentro de PE (mun_front_int.csv)
+
+mun_front_ext <- read_delim("mun_front_ext.csv", delim = ";") 
+
+mun_front_int <- read_delim("mun_front_int.csv", delim = ";") 
+
+
+```
+
+
+Vamos juntar a base completa de homicídios com as bases dos municípios de fronteira
+
+```{r}
+
+# Base de homicídios para municípios de fronteira fora de PE
+hom_front_ext <-
+  mun_front_ext %>%
+  inner_join(homic_est_front %>% rename(code_muni = codibge7), by = "code_muni") 
+
+# base de homicídios para municípios de fronteira dentro de PE
+hom_int_pe <-
+  mun_front_int %>%
+  inner_join(homic_pe %>% rename(code_muni = codibge7), by = "code_muni")
+
+
+```
+
+Nova tentativa de separar coluna geom em lat/long:
+
+```{r}
+
+# não funciona!
+test <-
+hom_front_ext %>% clean_names() %>%
+  separate(geom, c("long","lat"), "|")
+```
+
+Salvar bases: 
+
+```{r}
+
+fwrite(hom_front_ext, here("temp_scripts_natalia","hom_front_ext.csv"), sep = ";")
+
+fwrite(hom_int_pe, here("temp_scripts_natalia","hom_front_int.csv"), sep = ";")
+
+```
+
