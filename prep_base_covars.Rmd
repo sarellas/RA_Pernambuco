@@ -1,0 +1,256 @@
+---
+title: "Preparando Covariadas (Fronteira)"
+author: "Natália Sarellas"
+date: "22/02/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE, error=FALSE, warning=FALSE, message=FALSE)
+```
+
+# Criando base final dos municípios de fronteira com covariadas
+
+```{r}
+require(read.dbc)
+require(tidyverse)
+require(data.table)
+library(lubridate)
+library(janitor)
+library(here)
+library(dplyr)
+```
+
+
+## Inputs:
+
+```{r}
+# Bases municípios + homicídios
+
+hom_front_ext <- read_delim("hom_front_ext.csv", delim = ";") 
+
+# Bases auxiliares (covariadas)
+
+cov_pop <- fread(here("data", "auxiliary", "covars_tabnet_pop.csv"))
+
+codmun <- fread(here("data", "raw", "municipio.csv"),
+                select = c("id_municipio", "id_municipio_tse", "id_microrregiao", "id_mesorregiao", "nome")) %>%
+  .[,.(codibge7 = id_municipio,
+       codtse = id_municipio_tse,
+       codmicro = id_microrregiao,
+       codmeso = id_mesorregiao,
+       nm_munic = nome)]
+
+```
+
+## Output 1: match_muni.csv
+
+Criar base simplificada apenas com código dos municípios de fronteira externos e internos à Pernambuco:
+
+```{r}
+
+match_muni <-
+  hom_front_ext %>% 
+  dplyr::select(code_muni, mun_pe, lon, lat)
+
+fwrite(match_muni, here("temp_scripts_natalia", "match_muni.csv"), sep = ";")
+
+```
+
+
+## Output2: Base homicídios x covariadas (main_dataset_front.csv)
+
+
+```{r}
+
+# Criar base sem municípios repetidos:
+
+hom_front_ext <-
+  hom_front_ext %>%
+  rename(codibge7 = code_muni) %>%
+  dplyr::select(-mun_pe) %>%
+  distinct()
+
+
+```
+
+Próximos passos:
+
+Juntar dados das seguintes bases do Bruce:
+
+- covars_tabnet_pop (base populacional para cada faixa etária para cada ano)
+
+- covars_ipea_pib (buscas no IpeaData e limpar)
+
+```{r}
+
+ipea_pib <- fread(here("data", "raw", "covars", "ipeadata_pib_mun_nordeste.csv"))
+
+setnames(ipea_pib, "CÃ³digo", "codibge7")
+
+ipea_pib <- 
+  ipea_pib %>% 
+  pivot_longer(cols = c("2002","2003", "2004", "2005", "2006", "2007", "2008", "2009", "2010", "2011", "2012", "2013", "2014", "2015", "2016"), names_to = "year", values_to = "pib") %>%
+  select(codibge7, year, pib)
+
+ipea_pib <- as.data.table(ipea_pib)
+
+ipea_pib[, pib := as.double(str_replace(pib, ",", "."))]
+
+
+setorder(ipea_pib, "codibge7")
+
+```
+
+### Deflacionar PIB !!!
+
+```{r}
+
+# Base IPCA (retirada do site do ibge)
+
+ipca <- fread(here("data", "auxiliary", "ipca_anual_brasil.csv"))
+
+ipca <-
+ipca %>% 
+  separate(V1, c("mes", "year"), sep = " ") %>%
+  rename(ipca = Brasil) %>%
+  select(year, ipca) %>%
+  filter(year %between% c(2002,2016))
+
+```
+
+```{r}
+
+
+# Juntar ipca com base do pib:
+
+ipea_pib_ipca <- ipea_pib %>% left_join(ipca, "year")
+
+rm(ipea_pib)
+
+# Deflacionando pelo ipca no último ano da amostra (2016):
+
+ipea_pib_def <-
+ipea_pib_ipca %>% 
+  mutate(pib_def = pib/ipca*ipca[15]) %>%
+  select(codibge7, year, pib, pib_def)
+
+rm(ipea_pib_ipca)
+
+
+fwrite(ipea_pib_def, here("data", "auxiliary", "covars_ipea_pib_def.csv"))
+```
+
+
+- covars_electoral_idh (buscar pelo código)
+
+Chama os dados do repositório do Rodrigo Silveira.
+
+```{r}
+# IDH
+
+electoral <- fread(here("data", "raw", "covars", "electoral/BPSR_Data_Power_Rodrigues-Silveira_v2_en.csv"))
+
+electoral <- electoral[uf %in% c("PB", "CE", "AL", "BA", "PI") & year %between% c(2002, 2016)]
+
+electoral <- electoral %>% complete(GEOCODIG_M, year = 2002:2016) %>% as.data.table()
+
+
+electoral <- electoral[, .(codibge7 = GEOCODIG_M, year, idh = IDHM, ideology = ideo_imp)]
+
+electoral <- electoral %>%
+  group_by(codibge7) %>%
+  fill(c("idh", "ideology"), .direction = "downup")
+
+fwrite(electoral, here("data", "auxiliary", "covars_electoral_idh_semPE.csv"))
+
+rm(electoral)
+
+# Chamar a base recém criada
+
+cov_elec <- fread(here("data", "auxiliary", "covars_electoral_idh_semPE.csv"))
+
+```
+
+Juntando as Bases:
+
+```{r}
+  
+# Merge 1: main = hom_front_ext <- cov_pop
+main <- merge(hom_front_ext, cov_pop,
+              all.x = TRUE,
+              all.y = FALSE,
+              by = c("codibge7", "year"))
+
+rm(cov_pop)
+rm(hom_front_ext)
+
+# Merge 2: main = main <- ipea_pib_def
+main <- merge(main, ipea_pib_def,
+              all.x = TRUE,
+              all.y = FALSE,
+              by = c("codibge7", "year"))
+
+rm(ipea_pib_def)
+
+# Merge 3: main = main <- cov_elec
+main <- merge(main, cov_elec,
+              all.x = TRUE,
+              all.y = FALSE,
+              by = c("codibge7", "year"))
+
+rm(cov_elec)
+
+# Merge 4: main = main <- codmun
+main <- merge(main, codmun,
+              all.x = TRUE,
+              all.y = FALSE,
+              by = c("codibge7"))
+
+rm(codmun)
+
+# Order columns
+setcolorder(main, c("codibge7", "nm_munic","codtse", "codmicro", "codmeso", "year"))
+
+
+# Replace NA in outcome columns by zero
+outcomes <- grep("^homic|^other|^fun", names(main))
+setnafill(main, fill = 0, cols = outcomes)
+
+# "All" variables
+# Other homic outcomes
+main <- as.data.table(main)
+main[, ':='(homic_all = homic_f_all + homic_m_all,
+            homic_treated = homic_f_treated + homic_m_treated,
+            homic_control = homic_f_control + homic_m_control,
+            other_all = other_f_all + other_m_all,
+            other_treated = other_f_treated + other_m_treated,
+            other_control = other_f_control + other_m_control)]
+
+
+# Calculate shares
+treated_cols <- grep("([homic|other]_[m|f]_treated\\b)|homic_treated", names(main))
+control_cols <- grep("([homic|other]_[m|f]_control\\b)|homic_control", names(main))
+all_cols <- grep("([homic|other]_[f|m]_all\\b)|homic_all", names(main))
+
+
+main[, (treated_cols) := lapply(.SD, function(x) (x/pop_treated)*100000), .SDcols = treated_cols]
+
+main[, (control_cols) := lapply(.SD, function(x) (x/pop_control)*100000), .SDcols = control_cols]
+
+main[, (all_cols) := lapply(.SD, function(x) (x/pop_all)*100000), .SDcols = all_cols]
+
+
+
+main[, pibpc := pib/pop_all]
+
+# Clear memory and save
+gc()
+
+# Drop duplicates
+main <- unique(main)
+
+fwrite(main, file = here("data", "clean", "main_dataset_front.csv"), sep = ";")
+
+```
+
